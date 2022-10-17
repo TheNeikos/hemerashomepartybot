@@ -10,11 +10,11 @@ use teloxide::{
     dptree,
     payloads::SendMessageSetters,
     prelude::{Dispatcher, Requester, ResponseResult},
-    types::{ChatId, InputFile, Message, MessageEntityKind, Update, UserId},
+    types::{ChatId, InputFile, Message, MessageEntityKind, ReplyMarkup, Update, UserId},
     utils::command::BotCommands,
     Bot,
 };
-use tokio::{process::Command, sync::Mutex, task::JoinHandle};
+use tokio::{process::Command, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -47,6 +47,14 @@ async fn main() {
             })
             .filter_command::<MaintainerCommands>()
             .endpoint(answer_maintainers),
+        )
+        .branch(
+            dptree::filter(|msg: Message, cfg: ConfigParameters| {
+                (msg.chat.is_group() || msg.chat.is_supergroup())
+                    && msg.chat.id == cfg.authorized_group
+            })
+            .filter_command::<UserCommands>()
+            .endpoint(answer_users),
         )
         .branch(
             dptree::filter(|msg: Message, cfg: ConfigParameters| {
@@ -103,26 +111,12 @@ struct ConfigParameters {
     description = "You can use the following commands:"
 )]
 enum MaintainerCommands {
-    #[command(description = "display this help.")]
-    Help,
-    #[command(description = "authorize a user in a party chat.")]
-    AddPartyUser(String),
     #[command(description = "skip current video")]
     Next,
 }
 
-async fn answer_maintainers(
-    bot: Bot,
-    msg: Message,
-    cmd: MaintainerCommands,
-    queue: Arc<MediaQueue>,
-) -> ResponseResult<()> {
+async fn answer_maintainers(cmd: MaintainerCommands, queue: Arc<MediaQueue>) -> ResponseResult<()> {
     match cmd {
-        MaintainerCommands::Help => {
-            let help = MaintainerCommands::descriptions().to_string();
-            bot.send_message(msg.chat.id, help).await?;
-        }
-        MaintainerCommands::AddPartyUser(_) => todo!(),
         MaintainerCommands::Next => {
             queue.next_video().await;
         }
@@ -132,12 +126,27 @@ async fn answer_maintainers(
 
 async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> ResponseResult<()> {
     if let Some(entities) = msg.parse_entities() {
-        let url_entities = entities
+        let youtube_ids = entities
             .iter()
-            .filter(|ent| matches!(ent.kind(), MessageEntityKind::Url))
+            .filter_map(|entity| {
+                if entity.kind() == &MessageEntityKind::Url {
+                    let yt_regex = Regex::new(r"(?:.be/|/watch\?v=)([\w/\-]+)").unwrap();
+                    if let Some(yt_matches) = yt_regex.captures(entity.text()) {
+                        Some(yt_matches.get(1).unwrap().as_str().to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
 
-        let count = url_entities.len();
+        let count = youtube_ids.len();
+        if count == 0 {
+            return Ok(());
+        }
+
         bot.send_message(
             msg.chat.id,
             format!(
@@ -149,21 +158,12 @@ async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> Respons
         .reply_to_message_id(msg.id)
         .await?;
 
-        for entity in url_entities {
-            if entity.kind() == &MessageEntityKind::Url {
-                info!("Received a message of URL: {:?}", entity.text());
-                let yt_regex = Regex::new(r"(?:.be/|/watch\?v=)([\w/\-]+)").unwrap();
-                if let Some(yt_matches) = yt_regex.captures(entity.text()) {
-                    let id = yt_matches.get(1).unwrap().as_str().to_string();
-                    info!(?id, "Found id, adding to queue");
-                    queue.add_youtube_to_queue(id).await;
-                    debug!("Done adding to queue!");
-                }
-            }
+        for id in youtube_ids {
+            info!(?id, "Found id, adding to queue");
+            queue.add_youtube_to_queue(id).await;
         }
-        if count > 0 {
-            queue.start_playing_if_empty().await;
-        }
+
+        queue.start_playing_if_empty().await;
     }
     Ok(())
 }
@@ -207,6 +207,9 @@ impl MediaQueue {
 }
 
 impl MediaQueue {
+    pub async fn get_current_queue(&self) -> Vec<Medium> {
+        self.media.lock().await.clone()
+    }
     pub async fn next_video(&self) {
         let next_id = self.current_medium.fetch_update(
             std::sync::atomic::Ordering::SeqCst,
@@ -282,7 +285,12 @@ impl MediaQueue {
                     match vid {
                         Medium::Youtube(yt_vid) => spawn_download(yt_vid.id, &token).await,
                     }
-                    let _ = current_medium.fetch_update(
+
+                    if token.is_cancelled() {
+                        debug!("Token got cancelled, stopping loop");
+                        break;
+                    }
+                    let next_id = current_medium.fetch_update(
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
                         |val| {
@@ -293,6 +301,7 @@ impl MediaQueue {
                             }
                         },
                     );
+                    debug!("Media finished, next id is: {next_id:?}");
                 } else {
                     debug!("No more videos in queue, stopping player.");
                     current_medium.store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
@@ -323,4 +332,64 @@ async fn spawn_download(id: String, token: &CancellationToken) {
             mpv.wait().await.expect("could not wait");
         }
     }
+}
+
+#[derive(Clone, BotCommands)]
+#[command(
+    rename_rule = "lowercase",
+    description = "You can use the following commands:"
+)]
+enum UserCommands {
+    #[command(description = "display this help.")]
+    Help,
+    #[command(description = "Show the current queue")]
+    Queue,
+}
+
+async fn answer_users(
+    bot: Bot,
+    msg: Message,
+    cmd: UserCommands,
+    queue: Arc<MediaQueue>,
+) -> ResponseResult<()> {
+    match cmd {
+        UserCommands::Help => {
+            let help = UserCommands::descriptions().to_string();
+            bot.send_message(msg.chat.id, help).await?;
+        }
+        UserCommands::Queue => {
+            let media_queue = queue.get_current_queue().await;
+            let current = queue
+                .current_medium
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let mut answer = String::from("The current queue:\n\n");
+
+            for (idx, elem) in media_queue.iter().enumerate() {
+                answer.push_str(&format!(
+                    "{} {}\n",
+                    if idx == current { ">" } else { "-" },
+                    elem
+                ));
+            }
+
+            answer.push_str(&format!(
+                "*Status:* {}",
+                if current == usize::MAX {
+                    "Not Playing"
+                } else {
+                    "Playing"
+                }
+            ));
+
+            bot.send_message(msg.chat.id, answer)
+                .reply_to_message_id(msg.id)
+                .disable_web_page_preview(true)
+                .parse_mode(
+                    #[allow(deprecated)]
+                    teloxide::types::ParseMode::Markdown,
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
