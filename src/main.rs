@@ -1,8 +1,4 @@
-use std::{
-    fmt::Display,
-    process::Stdio,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::{fmt::Display, process::Stdio, sync::Arc};
 
 use clap::Parser;
 use regex::Regex;
@@ -203,7 +199,6 @@ impl Display for Medium {
 
 struct MediaQueue {
     media: Arc<Mutex<Vec<Medium>>>,
-    current_medium: Arc<AtomicUsize>,
     current_player: Mutex<Option<CancellationToken>>,
     bot: Bot,
     cfg: ConfigParameters,
@@ -213,7 +208,6 @@ impl MediaQueue {
     fn new(bot: Bot, cfg: ConfigParameters) -> Self {
         Self {
             media: Default::default(),
-            current_medium: Arc::new(AtomicUsize::from(usize::MAX)),
             current_player: Default::default(),
             bot,
             cfg,
@@ -226,21 +220,8 @@ impl MediaQueue {
         self.media.lock().await.clone()
     }
     pub async fn next_video(&self) {
-        let next_id = self.current_medium.fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |val| {
-                if val == usize::MAX {
-                    None
-                } else {
-                    Some(val.wrapping_add(1))
-                }
-            },
-        );
-        if let Ok(_) = next_id {
-            debug!("Skipped to next id, continuing!");
-            self.start_playing().await;
-        }
+        debug!("Skipped to next id, continuing!");
+        self.start_playing().await;
     }
     pub async fn add_youtube_to_queue(&self, id: String) {
         {
@@ -251,13 +232,7 @@ impl MediaQueue {
     }
 
     pub async fn start_playing_if_empty(&self) {
-        if self.current_medium.compare_exchange(
-            usize::MAX,
-            0,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        ) == Ok(usize::MAX)
-        {
+        if self.current_player.lock().await.is_none() {
             self.start_playing().await;
             debug!("Nothing was playing, starting now!");
         }
@@ -271,7 +246,6 @@ impl MediaQueue {
         }
 
         let media = self.media.clone();
-        let current_medium = self.current_medium.clone();
         let bot = self.bot.clone();
         let cfg = self.cfg.clone();
 
@@ -281,13 +255,9 @@ impl MediaQueue {
         tokio::spawn(async move {
             loop {
                 let vid: Option<Medium> = {
-                    let q = media.lock().await;
-                    let next_id = current_medium.load(std::sync::atomic::Ordering::SeqCst);
-                    if next_id != usize::MAX {
-                        q.get(next_id).cloned()
-                    } else {
-                        break;
-                    }
+                    let mut q = media.lock().await;
+                    let vid = q.pop();
+                    vid
                 };
 
                 if let Some(vid) = vid {
@@ -305,21 +275,9 @@ impl MediaQueue {
                         debug!("Token got cancelled, stopping loop");
                         break;
                     }
-                    let next_id = current_medium.fetch_update(
-                        std::sync::atomic::Ordering::SeqCst,
-                        std::sync::atomic::Ordering::SeqCst,
-                        |val| {
-                            if val == usize::MAX {
-                                None
-                            } else {
-                                Some(val.wrapping_add(1))
-                            }
-                        },
-                    );
-                    debug!("Media finished, next id is: {next_id:?}");
+                    debug!("Media finished");
                 } else {
                     debug!("No more videos in queue, stopping player.");
-                    current_medium.store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
                     token.cancel();
                     break;
                 }
@@ -374,25 +332,23 @@ async fn answer_users(
         }
         UserCommands::Queue => {
             let media_queue = queue.get_current_queue().await;
-            let current = queue
-                .current_medium
-                .load(std::sync::atomic::Ordering::SeqCst);
+            let currently_playing = { queue.current_player.lock().await.is_some() };
             let mut answer = String::from("The current queue:\n\n");
 
             for (idx, elem) in media_queue.iter().enumerate() {
                 answer.push_str(&format!(
                     "{} {}\n",
-                    if idx == current { ">" } else { "-" },
+                    if idx == 0 { "🔜" } else { "➡️" },
                     elem
                 ));
             }
 
             answer.push_str(&format!(
                 "*Status:* {}",
-                if current == usize::MAX {
-                    "Not Playing"
-                } else {
+                if currently_playing {
                     "Playing"
+                } else {
+                    "Not Playing"
                 }
             ));
 
