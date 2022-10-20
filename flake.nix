@@ -41,9 +41,17 @@
         };
 
         hhas = craneLib.buildPackage {
-          buildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.openssl ];
-
           inherit cargoArtifacts src version;
+
+          buildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.openssl ];
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+          ];
+
+          postFixup = ''
+            wrapProgram $out/bin/hhas --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.yt-dlp pkgs.mpv ]}"
+          '';
+
         };
 
       in
