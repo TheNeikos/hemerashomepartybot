@@ -328,6 +328,7 @@ impl MediaQueue {
 
 async fn spawn_download(id: String, token: &CancellationToken) {
     let mut mpv = Command::new("mpv")
+        .arg("--fullscreen")
         .arg(&format!("https://youtube.com/watch?v={}", id))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
