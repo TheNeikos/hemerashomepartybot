@@ -10,7 +10,7 @@ use teloxide::{
     dptree,
     payloads::SendMessageSetters,
     prelude::{Dispatcher, Requester, ResponseResult},
-    types::{ChatId, InputFile, Message, MessageEntityKind, ReplyMarkup, Update, UserId},
+    types::{ChatId, InputFile, Message, MessageEntityKind, Update, UserId},
     utils::command::BotCommands,
     Bot,
 };
@@ -18,6 +18,9 @@ use tokio::{process::Command, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PollId(String);
 
 #[tokio::main]
 async fn main() {
@@ -38,55 +41,58 @@ async fn main() {
         authorized_group: ChatId(-866400246),
     };
 
-    let handler = Update::filter_message()
+    let handler = dptree::entry()
         .branch(
-            dptree::filter(|cfg: ConfigParameters, msg: Message| -> bool {
-                msg.from()
-                    .map(|user| user.id == cfg.bot_maintainer)
-                    .unwrap_or_default()
-            })
-            .filter_command::<MaintainerCommands>()
-            .endpoint(answer_maintainers),
-        )
-        .branch(
-            dptree::filter(|msg: Message, cfg: ConfigParameters| {
-                (msg.chat.is_group() || msg.chat.is_supergroup())
-                    && msg.chat.id == cfg.authorized_group
-            })
-            .filter_command::<UserCommands>()
-            .endpoint(answer_users),
-        )
-        .branch(
-            dptree::filter(|msg: Message, cfg: ConfigParameters| {
-                (msg.chat.is_group() || msg.chat.is_supergroup())
-                    && msg.chat.id == cfg.authorized_group
-            })
-            .endpoint(answer_group),
-        )
-        .branch(
-            dptree::filter(|msg: Message, cfg: ConfigParameters| {
-                msg.chat.is_private()
-                    && msg
-                        .from()
-                        .map(|user| user.id != cfg.bot_maintainer)
-                        .unwrap_or_default()
-            })
-            .endpoint(|bot: Bot, msg: Message| async move {
-                bot.send_message(
-                    msg.chat.id,
-                    "I'm sorry, but you're not authorized to interact with this bot privately.",
+            Update::filter_message()
+                .branch(
+                    dptree::filter(|cfg: ConfigParameters, msg: Message| -> bool {
+                        msg.from()
+                            .map(|user| user.id == cfg.bot_maintainer)
+                            .unwrap_or_default()
+                    })
+                    .filter_command::<MaintainerCommands>()
+                    .endpoint(answer_maintainers),
                 )
-                .reply_to_message_id(msg.id)
-                .await?;
-                bot.send_sticker(
-                    msg.chat.id,
-                    InputFile::file_id(
-                        "CAACAgIAAxkBAAMLY0vpn7zaM5lockhD1jzrkMujR0gAAu4BAAK813YEA5042ZQ7LZEqBA",
-                    ),
+                .branch(
+                    dptree::filter(|msg: Message, cfg: ConfigParameters| {
+                        (msg.chat.is_group() || msg.chat.is_supergroup())
+                            && msg.chat.id == cfg.authorized_group
+                    })
+                    .filter_command::<UserCommands>()
+                    .endpoint(answer_users),
                 )
-                .await?;
-                return Ok(());
-            }),
+                .branch(
+                    dptree::filter(|msg: Message, cfg: ConfigParameters| {
+                        (msg.chat.is_group() || msg.chat.is_supergroup())
+                            && msg.chat.id == cfg.authorized_group
+                    })
+                    .endpoint(answer_group),
+                )
+                .branch(
+                    dptree::filter(|msg: Message, cfg: ConfigParameters| {
+                        msg.chat.is_private()
+                            && msg
+                                .from()
+                                .map(|user| user.id != cfg.bot_maintainer)
+                                .unwrap_or_default()
+                    })
+                    .endpoint(|bot: Bot, msg: Message| async move {
+                        bot.send_message(
+                            msg.chat.id,
+                            "I'm sorry, but you're not authorized to interact with this bot privately.",
+                        )
+                        .reply_to_message_id(msg.id)
+                        .await?;
+                                bot.send_sticker(
+                            msg.chat.id,
+                            InputFile::file_id(
+                                "CAACAgIAAxkBAAMLY0vpn7zaM5lockhD1jzrkMujR0gAAu4BAAK813YEA5042ZQ7LZEqBA",
+                            ),
+                        )
+                        .await?;
+                        return Ok(());
+                    }),
+                ),
         );
 
     let queue = Arc::new(MediaQueue::new(bot.clone(), params.clone()));
@@ -165,6 +171,7 @@ async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> Respons
 
         queue.start_playing_if_empty().await;
     }
+
     Ok(())
 }
 
