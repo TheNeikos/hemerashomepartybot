@@ -4,6 +4,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
+use clap::Parser;
 use regex::Regex;
 use teloxide::{
     dispatching::{HandlerExt, UpdateFilterExt},
@@ -19,8 +20,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PollId(String);
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    maintainer: u64,
+    #[arg(short, long)]
+    group: i64,
+}
 
 #[tokio::main]
 async fn main() {
@@ -33,12 +40,13 @@ async fn main() {
         .init();
 
     let bot = Bot::from_env();
+    let args = Args::parse();
 
     info!("Started bot!");
 
     let params = ConfigParameters {
-        bot_maintainer: UserId(74897340),
-        authorized_group: ChatId(-866400246),
+        bot_maintainer: UserId(args.maintainer),
+        authorized_group: ChatId(args.group),
     };
 
     let handler = dptree::entry()
