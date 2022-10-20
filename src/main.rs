@@ -1,4 +1,4 @@
-use std::{fmt::Display, process::Stdio, sync::Arc};
+use std::{collections::VecDeque, fmt::Display, process::Stdio, sync::Arc, time::Duration};
 
 use clap::Parser;
 use regex::Regex;
@@ -7,7 +7,7 @@ use teloxide::{
     dptree,
     payloads::SendMessageSetters,
     prelude::{Dispatcher, Requester, ResponseResult},
-    types::{ChatId, InputFile, Message, MessageEntityKind, Update, UserId},
+    types::{ChatId, InputFile, Message, MessageEntityKind, Update, User, UserId},
     utils::command::BotCommands,
     Bot,
 };
@@ -170,7 +170,14 @@ async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> Respons
 
         for id in youtube_ids {
             info!(?id, "Found id, adding to queue");
-            queue.add_youtube_to_queue(id).await;
+            queue
+                .add_youtube_to_queue(
+                    id,
+                    msg.from()
+                        .cloned()
+                        .expect("Did not receive a message from a user?"),
+                )
+                .await;
         }
 
         queue.start_playing_if_empty().await;
@@ -181,27 +188,42 @@ async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> Respons
 
 #[derive(Debug, Clone)]
 struct YoutubeVideo {
+    title: String,
+    length: usize,
     id: String,
 }
 
 #[derive(Debug, Clone)]
-enum Medium {
+enum MediumKind {
     Youtube(YoutubeVideo),
 }
 
-impl Display for Medium {
+#[derive(Debug, Clone)]
+struct Medium {
+    adder: User,
+    kind: MediumKind,
+}
+
+impl Display for MediumKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Medium::Youtube(yt) => write!(f, "🎬 https://youtube.com/watch?v={}", yt.id),
+            MediumKind::Youtube(yt) => write!(
+                f,
+                "🎬 [{title}](https://youtube.com/watch?v={id}) _{length}_",
+                id = yt.id,
+                title = yt.title,
+                length = humantime::format_duration(Duration::from_secs(yt.length as u64)),
+            ),
         }
     }
 }
 
 struct MediaQueue {
-    media: Arc<Mutex<Vec<Medium>>>,
+    media: Arc<Mutex<VecDeque<Medium>>>,
     current_player: Mutex<Option<CancellationToken>>,
     bot: Bot,
     cfg: ConfigParameters,
+    client: invidious::reqwest::asynchronous::Client,
 }
 
 impl MediaQueue {
@@ -211,23 +233,41 @@ impl MediaQueue {
             current_player: Default::default(),
             bot,
             cfg,
+            client: invidious::reqwest::asynchronous::Client::new(String::from(
+                "https://vid.puffyan.us",
+            )),
         }
     }
 }
 
 impl MediaQueue {
-    pub async fn get_current_queue(&self) -> Vec<Medium> {
+    pub async fn get_current_queue(&self) -> VecDeque<Medium> {
         self.media.lock().await.clone()
     }
     pub async fn next_video(&self) {
         debug!("Skipped to next id, continuing!");
         self.start_playing().await;
     }
-    pub async fn add_youtube_to_queue(&self, id: String) {
+    pub async fn add_youtube_to_queue(&self, id: String, adder: User) {
         {
             let mut q = self.media.lock().await;
             debug!(?id, "Added to queue");
-            q.push(Medium::Youtube(YoutubeVideo { id }));
+
+            let info = self.client.video(&id, None).await;
+
+            let (title, length) = {
+                if let Ok(info) = info {
+                    (info.title, info.length as usize)
+                } else {
+                    (String::from("Unknown"), 0)
+                }
+            };
+
+            let vid = Medium {
+                adder,
+                kind: MediumKind::Youtube(YoutubeVideo { id, title, length }),
+            };
+            q.push_back(vid);
         }
     }
 
@@ -256,19 +296,21 @@ impl MediaQueue {
             loop {
                 let vid: Option<Medium> = {
                     let mut q = media.lock().await;
-                    let vid = q.pop();
+                    let vid = q.pop_front();
                     vid
                 };
 
                 if let Some(vid) = vid {
                     let _ = bot
-                        .send_message(cfg.authorized_group, format!("Now playing {}", vid))
+                        .send_message(cfg.authorized_group, format!("Now playing {}", vid.kind))
+                        .parse_mode(
+                            #[allow(deprecated)]
+                            teloxide::types::ParseMode::Markdown,
+                        )
                         .await;
-                    let vid: Medium = vid.clone();
 
-                    let vid = vid;
-                    match vid {
-                        Medium::Youtube(yt_vid) => spawn_download(yt_vid.id, &token).await,
+                    match vid.kind {
+                        MediumKind::Youtube(yt_vid) => spawn_download(yt_vid.id, &token).await,
                     }
 
                     if token.is_cancelled() {
@@ -337,14 +379,15 @@ async fn answer_users(
 
             for (idx, elem) in media_queue.iter().enumerate() {
                 answer.push_str(&format!(
-                    "{} {}\n",
-                    if idx == 0 { "🔜" } else { "➡️" },
-                    elem
+                    "{prefix} {title} \n  *Added By:* {adder}\n",
+                    prefix = if idx == 0 { "🔜" } else { "➡️" },
+                    title = elem.kind,
+                    adder = elem.adder.full_name(),
                 ));
             }
 
             answer.push_str(&format!(
-                "*Status:* {}",
+                "\n*Status:* {}",
                 if currently_playing {
                     "Playing"
                 } else {
