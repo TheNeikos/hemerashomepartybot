@@ -35,10 +35,14 @@
         src = craneLib.cleanCargoSource ./.;
 
         cargoArtifacts = craneLib.buildDepsOnly {
+          buildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.openssl ];
+
           inherit src;
         };
 
         hhas = craneLib.buildPackage {
+          buildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.openssl ];
+
           inherit cargoArtifacts src version;
         };
 

@@ -94,7 +94,7 @@ async fn main() {
                             ),
                         )
                         .await?;
-                        return Ok(());
+                        Ok(())
                     }),
                 ),
         );
@@ -141,11 +141,9 @@ async fn answer_group(bot: Bot, msg: Message, queue: Arc<MediaQueue>) -> Respons
             .filter_map(|entity| {
                 if entity.kind() == &MessageEntityKind::Url {
                     let yt_regex = Regex::new(r"(?:.be/|/watch\?v=)([\w/\-]+)").unwrap();
-                    if let Some(yt_matches) = yt_regex.captures(entity.text()) {
-                        Some(yt_matches.get(1).unwrap().as_str().to_string())
-                    } else {
-                        None
-                    }
+                    yt_regex
+                        .captures(entity.text())
+                        .map(|yt_matches| yt_matches.get(1).unwrap().as_str().to_string())
                 } else {
                     None
                 }
@@ -296,8 +294,7 @@ impl MediaQueue {
             loop {
                 let vid: Option<Medium> = {
                     let mut q = media.lock().await;
-                    let vid = q.pop_front();
-                    vid
+                    q.pop_front()
                 };
 
                 if let Some(vid) = vid {
